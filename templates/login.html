@@ -1,0 +1,12 @@
+<h1>Login</h1>
+<form method="POST">
+    Email: <input type="email" name="email" required><br>
+    Senha: <input type="password" name="senha" required><br>
+    <button type="submit">Entrar</button>
+</form>
+<a href="{{ url_for('registro') }}">Não tem conta? Registrar</a>
+{% with messages = get_flashed_messages() %}
+    {% for msg in messages %}
+        <p>{{ msg }}</p>
+    {% endfor %}
+{% endwith %}

@@ -1,0 +1,4 @@
+<h1>Bem-vindo, {{ usuario.nome }}!</h1>
+<p>Email: {{ usuario.email }}</p>
+<p>Consentimento: {{ 'Sim' if usuario.consentimento else 'Não' }}</p>
+<a href="{{ url_for('logout') }}">Sair</a>
