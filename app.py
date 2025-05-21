@@ -1,87 +1,149 @@
-# Importa as bibliotecas necessárias do Flask, SQLAlchemy e Werkzeug
-from flask import Flask, render_template, request, redirect, url_for, flash, session
+# Importando as bibliotecas do Flask, segurança, banco de dados, validação e utilitários
+from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, make_response
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
+from functools import wraps
+import json
 
-# Cria a aplicação Flask
+# Importando funções personalizadas de arquivos do projeto
+from utils import (
+    limpar_dados_entrada,
+    normalizar_nome,
+    classificar_usuarios,
+    filtrar_por_consentimento,
+    buscar_usuarios
+)
+from validators import validar_email, validar_nome
+
+# Criando o app Flask
 app = Flask(__name__)
-# Carrega as configurações a partir do arquivo config.py (classe Config)
+# Carregando configurações do projeto (como chave secreta e banco)
 app.config.from_object('config.Config')
-
-# Inicializa a conexão com o banco de dados usando SQLAlchemy
+# Inicializando o banco com SQLAlchemy
 db = SQLAlchemy(app)
 
-# Define o modelo da tabela 'Usuario' no banco de dados
+# Redireciona para HTTPS automaticamente (se não estiver em modo debug)
+@app.before_request
+def before_request():
+    if not request.is_secure and not app.debug:
+        url = request.url.replace("http://", "https://", 1)
+        return redirect(url, code=301)
+
+# Definindo o modelo da tabela de usuários
 class Usuario(db.Model):
-    id = db.Column(db.Integer, primary_key=True)  # Campo id (chave primária)
-    nome = db.Column(db.String(100), nullable=False)  # Campo nome (obrigatório)
-    email = db.Column(db.String(100), unique=True, nullable=False)  # Campo email (único e obrigatório)
-    senha_hash = db.Column(db.String(200), nullable=False)  # Campo para armazenar a senha criptografada
-    consentimento = db.Column(db.Boolean, default=False)  # Campo para armazenar consentimento (padrão falso)
+    id = db.Column(db.Integer, primary_key=True)
+    nome = db.Column(db.String(100), nullable=False)
+    email = db.Column(db.String(100), unique=True, nullable=False)
+    senha_hash = db.Column(db.String(200), nullable=False)
+    consentimento = db.Column(db.Boolean, default=False)
 
-# Rota principal da aplicação (página inicial)
+# Decorador pra exigir login nas rotas
+def login_requerido(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'usuario_id' not in session:
+            flash('Você precisa estar logado pra acessar essa página.')
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Página inicial, só acessa se estiver logado
 @app.route('/')
+@login_requerido
 def index():
-    if 'usuario_id' in session:  # Verifica se o usuário está logado
-        usuario = Usuario.query.get_or_404(session['usuario_id'])  # Busca o usuário pelo ID na sessão
-        return render_template('index.html', usuario=usuario)  # Exibe a página inicial passando os dados do usuário
-    return redirect(url_for('login'))  # Se não estiver logado, redireciona para a página de login
+    usuario = Usuario.query.get_or_404(session['usuario_id'])
+    return render_template('index.html', usuario=usuario)
 
-# Rota para registro de novos usuários
+# Rota de cadastro de novos usuários
 @app.route('/registro', methods=['GET', 'POST'])
 def registro():
-    if request.method == 'POST':  # Se o formulário for enviado (método POST)
-        nome = request.form.get('nome')  # Pega o valor do campo nome
-        email = request.form.get('email')  # Pega o valor do campo email
-        senha = request.form.get('senha')  # Pega o valor do campo senha
-        consentimento = 'consentimento' in request.form  # Verifica se o checkbox de consentimento foi marcado
+    if request.method == 'POST':
+        # Pegando os dados do formulário
+        nome = normalizar_nome(request.form.get('nome'))
+        email = limpar_dados_entrada(request.form.get('email'))
+        senha = request.form.get('senha')
+        consentimento = 'consentimento' in request.form
 
-        # Validação: todos os campos devem ser preenchidos
+        # Validando os campos
         if not nome or not email or not senha:
-            flash('Todos os campos são obrigatórios.')  # Exibe mensagem de erro
-            return redirect(url_for('registro'))  # Redireciona de volta para o registro
+            flash('Preencha todos os campos, por favor.')
+            return redirect(url_for('registro'))
 
-        # Verifica se o email já está cadastrado no banco
+        if not validar_nome(nome):
+            flash('Nome inválido.')
+            return redirect(url_for('registro'))
+
+        if not validar_email(email):
+            flash('E-mail inválido.')
+            return redirect(url_for('registro'))
+
         if Usuario.query.filter_by(email=email).first():
-            flash('E-mail já cadastrado.')  # Exibe mensagem de erro
-            return redirect(url_for('registro'))  # Redireciona de volta para o registro
+            flash('Esse e-mail já está sendo usado.')
+            return redirect(url_for('registro'))
 
-        # Criptografa a senha digitada pelo usuário
+        # Criptografando a senha e criando o usuário
         senha_hash = generate_password_hash(senha)
-        # Cria um novo objeto Usuario com os dados informados
         novo_usuario = Usuario(nome=nome, email=email, senha_hash=senha_hash, consentimento=consentimento)
 
-        # Adiciona o novo usuário ao banco de dados
-        db.session.add(novo_usuario)
-        db.session.commit()
+        # Tentando salvar no banco
+        try:
+            db.session.add(novo_usuario)
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            flash('Erro ao salvar no banco de dados: ' + str(e))
+            return redirect(url_for('registro'))
 
-        flash('Cadastro realizado com sucesso.')  # Exibe mensagem de sucesso
-        return redirect(url_for('login'))  # Redireciona para a página de login
+        flash('Cadastro feito! Agora é só logar.')
+        return redirect(url_for('login'))
 
-    return render_template('registro.html')  # Exibe a página de registro (GET)
+    return render_template('registro.html')
 
 # Rota de login
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    if request.method == 'POST':  # Se o formulário for enviado (método POST)
-        email = request.form.get('email')  # Pega o valor do campo email
-        senha = request.form.get('senha')  # Pega o valor do campo senha
+    if request.method == 'POST':
+        email = limpar_dados_entrada(request.form.get('email'))
+        senha = request.form.get('senha')
 
-        # Validação: todos os campos devem ser preenchidos
         if not email or not senha:
-            flash('Por favor, preencha todos os campos.')  # Exibe mensagem de erro
-            return redirect(url_for('login'))  # Redireciona de volta para o login
+            flash('Tem que preencher o e-mail e a senha.')
+            return redirect(url_for('login'))
 
-        # Busca o usuário pelo email informado
         usuario = Usuario.query.filter_by(email=email).first()
 
-        # Verifica se o usuário existe e se a senha está correta
+        # Verifica se o usuário existe e a senha bate
         if usuario and check_password_hash(usuario.senha_hash, senha):
-            session['usuario_id'] = usuario.id  # Armazena o ID do usuário na sessão (usuário logado)
-            flash('Login realizado com sucesso!')  # Exibe mensagem de sucesso
-            return redirect(url_for('index'))  # Redireciona para a página inicial
+            session['usuario_id'] = usuario.id
+            flash('Login feito com sucesso!')
+            return redirect(url_for('index'))
         else:
-            flash('E-mail ou senha incorretos.')  # Exibe mensagem de erro
-            return redirect(url_for('login'))  # Redireciona de volta para o login
+            flash('E-mail ou senha errados.')
+            return redirect(url_for('login'))
 
-    return render_template('login.html')  # Exibe a página de login (GET)
+    return render_template('login.html')
+
+# Rota de logout (encerra a sessão)
+@app.route('/logout')
+@login_requerido
+def logout():
+    session.pop('usuario_id', None)
+    flash('Você saiu da conta.')
+    return redirect(url_for('login'))
+
+# Rota que gera um relatório de usuários em JSON bruto (sem download)
+@app.route('/relatorio')
+@login_requerido
+def relatorio():
+    criterio = request.args.get('ordenar_por', 'id')
+    usuarios = Usuario.query.all()
+    usuarios = classificar_usuarios(usuarios, criterio)
+    lista_usuarios = [
+        {
+            'id': u.id,
+            'nome': u.nome,
+            'email': u.email,
+            'consentimento': u.consentimento
+        } for u in usuarios
+    ]
+    r
